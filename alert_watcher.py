@@ -8,10 +8,10 @@ alert_watcher.py
 
 Як працює:
   1. Запускається з командного рядка (python alert_watcher.py).
-  2. Періодично опитує (за замовчуванням кожні 10 секунд) офіційний API
-     alerts.in.ua (IoT-ендпойнт), що повертає короткий статус повітряної
-     тривоги для локації: "A"/"P" — є тривога, "N" — немає.
-     Потрібен особистий токен у змінній середовища ALERTS_IN_UA_TOKEN.
+  2. Періодично опитує (за замовчуванням кожні 10 секунд) безкоштовний
+     публічний агрегатор https://ubilling.net.ua/aerialalerts/ — він проксує
+     дані з alerts.in.ua / ukrainealarm.com / каналу "Повітряна тривога" і
+     НЕ потребує реєстрації чи API-токена.
   3. Коли в Києві оголошується тривога — термінал стає червоним і
      виводиться повідомлення з типом загрози (повітряна тривога) та часом.
   4. Коли тривогу відбивають — колір терміналу повертається до звичайного.
@@ -23,9 +23,9 @@ alert_watcher.py
   python alert_watcher.py
   (зупинити: Ctrl+C — колір терміналу автоматично повернеться до звичайного)
 
-Опційно можна задати іншу локацію через UID із документації alerts.in.ua
-(за замовчуванням 31 = м. Київ) та підпис до неї, наприклад:
-  ALERT_LOCATION_UID=27 ALERT_LOCATION="Львівська область" python alert_watcher.py
+Опційно можна задати іншу локацію через змінну середовища ALERT_LOCATION
+(за замовчуванням "м. Київ"), наприклад:
+  ALERT_LOCATION="Львівська область" python alert_watcher.py
 """
 
 import os
@@ -51,28 +51,19 @@ except ImportError:
     # На сучасних Windows-терміналах (Windows Terminal, PowerShell 7+) ANSI
     # коди працюють і без colorama, тож просто продовжуємо без неї.
 
-# --- Джерело даних: офіційний API alerts.in.ua ---
-# Токен береться ВИКЛЮЧНО зі змінної середовища ALERTS_IN_UA_TOKEN — щоб секрет
-# не лежав у коді (папка синхронізується в OneDrive і є git-репозиторієм).
-# Встановити один раз:  setx ALERTS_IN_UA_TOKEN "ВАШ_ТОКЕН"
-TOKEN = os.environ.get("ALERTS_IN_UA_TOKEN")
-# UID локації в alerts.in.ua (31 = м. Київ). Інші UID — у документації API.
-LOCATION_UID = os.environ.get("ALERT_LOCATION_UID", "31")
-LOCATION = os.environ.get("ALERT_LOCATION", "м. Київ")  # лише для відображення
-API_URL = "https://api.alerts.in.ua/v1/alerts/active.json"
+# --- Джерело даних: безкоштовний агрегатор ubilling.net.ua/aerialalerts ---
+# Проксує офіційні дані (alerts.in.ua / ukrainealarm.com / канал "Повітряна
+# тривога") і НЕ потребує токена чи реєстрації. Локація задається людською
+# назвою (ключ у відповіді), напр. "м. Київ" — токен не потрібен.
+LOCATION = os.environ.get("ALERT_LOCATION", "м. Київ")
+API_URL = "https://ubilling.net.ua/aerialalerts/"
 
-POLL_INTERVAL_SECONDS = 10  # API дозволяє часті запити, цього більш ніж достатньо
+POLL_INTERVAL_SECONDS = 10  # API дозволяє ~2 запити/сек, цього більш ніж достатньо
 REQUEST_TIMEOUT = 8
 
-# Переклад типів тривоги (поле alert_type) на людську українську назву.
-ALERT_TYPE_NAMES = {
-    "air_raid": "Повітряна тривога",
-    "artillery_shelling": "Загроза артобстрілу",
-    "urban_fights": "Вуличні бої",
-    "chemical": "Хімічна загроза",
-    "nuclear": "Радіаційна загроза",
-    "info": "Інформування",
-}
+# Агрегатор віддає лише сам факт тривоги (alertnow), без підтипу загрози,
+# тож показуємо загальну категорію.
+ALERT_REASON = "Повітряна тривога"
 
 # Якщо ALERT_AUTOHIDE=1 (режим автозапуску) — вікно тримається згорнутим і
 # саме розгортається лише під час тривоги, після відбою згортається назад.
@@ -210,25 +201,25 @@ def render_alert_screen(reason: str) -> None:
 
 def fetch_alert_status():
     """
-    Повертає кортеж (active: bool, reason: str | None) для локації LOCATION_UID.
-    reason — людська назва причини (тип тривоги), напр. "Повітряна тривога".
-    Якщо для локації активно кілька типів — вони перелічуються через кому.
-    Кидає виняток при мережевій помилці / поганому токені — обробляється у циклі.
+    Повертає кортеж (active: bool, reason: str | None) для локації LOCATION.
+    reason — людська назва причини; агрегатор не дає підтипу, тож це завжди
+    загальна категорія ALERT_REASON ("Повітряна тривога").
+    Кидає виняток при мережевій помилці — обробляється у основному циклі.
     """
-    response = requests.get(API_URL, params={"token": TOKEN}, timeout=REQUEST_TIMEOUT)
+    response = requests.get(API_URL, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     data = response.json()
 
-    reasons = []
-    for alert in data.get("alerts", []):
-        if str(alert.get("location_uid")) == str(LOCATION_UID):
-            atype = alert.get("alert_type", "")
-            name = ALERT_TYPE_NAMES.get(atype, atype or "тривога")
-            if name not in reasons:  # унікальні, зі збереженням порядку
-                reasons.append(name)
+    states = data.get("states", {})
+    location_data = states.get(LOCATION)
+    if location_data is None:
+        raise KeyError(
+            f"Локацію '{LOCATION}' не знайдено у відповіді API. "
+            f"Доступні локації: {', '.join(states.keys())}"
+        )
 
-    if reasons:
-        return True, ", ".join(reasons)
+    if bool(location_data.get("alertnow", False)):
+        return True, ALERT_REASON
     return False, None
 
 
@@ -244,13 +235,6 @@ def print_status_line(alert_active: bool, reason: str = None, error: str = None)
 
 
 def main() -> None:
-    if not TOKEN:
-        sys.exit(
-            "Не задано токен alerts.in.ua.\n"
-            "Встанови його один раз командою (PowerShell або cmd):\n"
-            '  setx ALERTS_IN_UA_TOKEN "ВАШ_ТОКЕН"\n'
-            "потім відкрий НОВЕ вікно терміналу і запусти знову."
-        )
     enable_windows_ansi()
     print(f"Моніторинг тривоги для локації: {LOCATION}")
     print(f"Опитування кожні {POLL_INTERVAL_SECONDS} с. Джерело: {API_URL}")
