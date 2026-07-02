@@ -94,10 +94,20 @@ if (-not $pythonOk) {
 Write-Host "`n--- Перевірка бібліотеки requests ---"
 & python -c "import requests" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Встановлюю requests та colorama..."
-    & python -m pip install requests colorama
+    Write-Host "Встановлюю requests, colorama та alerts-in-ua..."
+    & python -m pip install requests colorama alerts-in-ua
 } else {
     Write-Host "requests вже встановлено." -ForegroundColor Green
+}
+
+# --- 5b. Перевірка / встановлення alerts-in-ua (основне джерело) ---
+Write-Host "`n--- Перевірка бібліотеки alerts-in-ua ---"
+& python -c "import alerts_in_ua" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Встановлюю alerts-in-ua (основне джерело тривог)..."
+    & python -m pip install alerts-in-ua
+} else {
+    Write-Host "alerts-in-ua вже встановлено." -ForegroundColor Green
 }
 
 Write-Host "`n=== Готово! ===" -ForegroundColor Cyan
